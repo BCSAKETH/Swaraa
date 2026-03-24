@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --gold: #f59e0b;
+  --gold-light: #fbbf24;
+  --gold-dim: rgba(245,158,11,0.1);
+  --gold-border: rgba(245,158,11,0.2);
+  --bg: #06040f;
+  --bg2: #0d0a1a;
+  --bg3: rgba(255,255,255,0.04);
+  --glass: rgba(255,255,255,0.05);
+  --glass-border: rgba(255,255,255,0.08);
+  --text: #e8dfc8;
+  --text2: rgba(232,223,200,0.55);
+  --text3: rgba(232,223,200,0.3);
+  --r: 14px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);margin:0}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(245,158,11,0.25);border-radius:3px}
+input,textarea{outline:none;font-family:'Inter',sans-serif}
+button{font-family:'Inter',sans-serif;cursor:pointer}
+
+/* ANIMATIONS */
+@keyframes shimmer{0%{background-position:-200% center}100%{background-position:200% center}}
+@keyframes pulse-soft{0%,100%{opacity:0.5}50%{opacity:1}}
+@keyframes slide-in-right{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes slide-in-up{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes fade-in{from{opacity:0}to{opacity:1}}
+@keyframes scale-pop{0%{transform:scale(0.8);opacity:0}60%{transform:scale(1.05)}100%{transform:scale(1);opacity:1}}
+@keyframes key-press{0%,100%{transform:translateY(0)}50%{transform:translateY(5px)}}
+@keyframes guide-pulse{from{box-shadow:0 0 14px rgba(16,185,129,0.5),0 0 0 2px rgba(16,185,129,0.3)}to{box-shadow:0 0 35px rgba(16,185,129,1),0 0 0 3px rgba(16,185,129,0.6),0 0 60px rgba(16,185,129,0.3)}}
+@keyframes correct-pop{0%{transform:scale(1)}40%{transform:scale(1.08)}100%{transform:scale(1)}}
+@keyframes wrong-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-6px)}40%{transform:translateX(6px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
+@keyframes float-note{0%{transform:translateY(0) rotate(0deg);opacity:0}15%{opacity:0.7}85%{opacity:0.3}100%{transform:translateY(-400px) rotate(540deg);opacity:0}}
+@keyframes title-reveal{from{opacity:0;letter-spacing:0.3em;filter:blur(10px)}to{opacity:1;letter-spacing:-0.02em;filter:blur(0)}}
+@keyframes landing-key{0%,100%{transform:translateY(0);filter:brightness(1)}50%{transform:translateY(-8px);filter:brightness(1.3) drop-shadow(0 0 10px rgba(245,158,11,0.7))}}
+@keyframes recording-ring{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.5)}50%{box-shadow:0 0 0 8px rgba(239,68,68,0)}}
+@keyframes firework-particle{0%{transform:translate(0,0) scale(1);opacity:1}100%{transform:translate(var(--fx),var(--fy)) scale(0);opacity:0}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+
+.swaraa-gold{background:linear-gradient(90deg,#b45309,#f59e0b,#fbbf24,#f59e0b,#b45309);background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;animation:shimmer 3s linear infinite;font-family:'Cinzel',serif}
+.guide-key{animation:guide-pulse 0.75s ease-in-out infinite alternate!important}
+.correct-anim{animation:correct-pop 0.3s ease!important}
+.wrong-anim{animation:wrong-shake 0.35s ease!important}
+.spin{animation:spin 1s linear infinite}
+.blink{animation:blink 1s ease-in-out infinite}
