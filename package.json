@@ -23,7 +23,11 @@
     "@supabase/supabase-js": "^2.99.3",
     "autoprefixer": "^10.4.20",
     "class-variance-authority": "^0.7.1",
+<<<<<<< HEAD
     "next": "15.3.8",
+=======
+    "next": "15.3.6",
+>>>>>>> 1cdd7b4 (fix: upgrade Next.js to 15.3.6 (CVE-2025-66478))
     "next-themes": "latest",
     "react": "^19",
     "react-dom": "^19",
