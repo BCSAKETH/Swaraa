@@ -167,22 +167,21 @@ White Keys: ` q w e r t y u i o p [ ] \
 
 ## 🎵 Support the Project
 
-If you enjoy **Web Harmonium**:
+If you enjoy **Swaraa**:
 ⭐ Star the repo • 🐛 Report bugs • 💡 Suggest features • 🔄 Share with friends • 💻 Contribute code
 
 ---
 ## 👨‍💻 Developer
 
-**Dhruv Akbari**
+**BALIJA CHAMAKURA SKAETH**
 *Full Stack Developer & Music Tech Enthusiast*
 
-🌍 [GitHub](https://github.com/mrakbari91) • [Codepen](https://codepen.com/dhruvakbari)  • [LinkedIn](https://www.linkedin.com/in/dhruvakbari) • [Instagram](https://www.instagram.com/1bari_91/) • [Facebook](https://www.facebook.com/dhruvakbari91/) • [X](https://x.com/mr_akbari_) 
-
-💌 **Email:** [dhruvakbari303@gmail.com](mailto:dhruvakbari303@gmail.com)
+🌍 [GitHub](https://github.com/BCSAKETH) • [LinkedIn](www.linkedin.com/in/balija-chamakura-saketh-692930375) • [Instagram]([https://www.instagram.com/bcsaketh/]) 
+💌 **Email:** [bcsaketh@gmail.com](mailto:bcsaketh@gmail.com)
 
 ---
 
-**© 2025 Web Harmonium**
+**© Swaraa**
 *Bridging Tradition with Technology, Built with ❤️ for Music Lovers*
 
 ---
