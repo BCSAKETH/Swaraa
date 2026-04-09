@@ -21,13 +21,10 @@
     "@radix-ui/react-toggle-group": "1.1.1",
     "@radix-ui/react-tooltip": "1.1.6",
     "@supabase/supabase-js": "^2.99.3",
+    "@vercel/speed-insights": "^2.0.0",
     "autoprefixer": "^10.4.20",
     "class-variance-authority": "^0.7.1",
-<<<<<<< HEAD
     "next": "15.3.8",
-=======
-    "next": "15.3.6",
->>>>>>> 1cdd7b4 (fix: upgrade Next.js to 15.3.6 (CVE-2025-66478))
     "next-themes": "latest",
     "react": "^19",
     "react-dom": "^19",
