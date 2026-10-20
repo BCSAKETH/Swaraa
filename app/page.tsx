@@ -1,5 +1,5 @@
 "use client"
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { supabase } from "@/lib/supabase"
 import type { User } from "@supabase/supabase-js"
 
@@ -575,6 +575,72 @@ function stopAmbientMusic() {
 }
 
 // ── MAIN COMPONENT ────────────────────────────────────────────────
+interface ActiveVoice {
+  source: AudioBufferSourceNode | OscillatorNode;
+  gain: GainNode;
+  reedVoices?: { source: AudioBufferSourceNode | OscillatorNode; gain: GainNode }[];
+}
+
+const BLACK_KEY_LEFT_POSITIONS: Record<number, number> = {
+  54: 42,
+  56: 108,
+  59: 240,
+  61: 306,
+  63: 372,
+  66: 504,
+  68: 570,
+  70: 636,
+  73: 768,
+  75: 834,
+  78: 966,
+  80: 1032,
+  83: 1164,
+};
+
+const STATIC_KEYS_LAYOUT: Array<{ type: "w" | "b"; midi: number; kchar: string }> = [
+  { type: "w", midi: 53, kchar: "`" },
+  { type: "b", midi: 54, kchar: "1" },
+  { type: "w", midi: 55, kchar: "q" },
+  { type: "b", midi: 56, kchar: "2" },
+  { type: "w", midi: 57, kchar: "w" },
+  { type: "w", midi: 58, kchar: "e" },
+  { type: "b", midi: 59, kchar: "4" },
+  { type: "w", midi: 60, kchar: "r" },
+  { type: "b", midi: 61, kchar: "5" },
+  { type: "w", midi: 62, kchar: "t" },
+  { type: "b", midi: 63, kchar: "7" },
+  { type: "w", midi: 64, kchar: "y" },
+  { type: "w", midi: 65, kchar: "u" },
+  { type: "b", midi: 66, kchar: "8" },
+  { type: "w", midi: 67, kchar: "i" },
+  { type: "b", midi: 68, kchar: "9" },
+  { type: "w", midi: 69, kchar: "o" },
+  { type: "b", midi: 70, kchar: "-" },
+  { type: "w", midi: 71, kchar: "p" },
+  { type: "w", midi: 72, kchar: "[" },
+  { type: "b", midi: 73, kchar: "=" },
+  { type: "w", midi: 74, kchar: "]" },
+  { type: "b", midi: 75, kchar: "" },
+  { type: "w", midi: 76, kchar: "\\" },
+  { type: "w", midi: 77, kchar: "z" },
+  { type: "b", midi: 78, kchar: "" },
+  { type: "w", midi: 79, kchar: "x" },
+  { type: "b", midi: 80, kchar: "" },
+  { type: "w", midi: 81, kchar: "c" },
+  { type: "w", midi: 82, kchar: "" },
+  { type: "b", midi: 83, kchar: "" },
+  { type: "w", midi: 84, kchar: "v" },
+];
+
+const STATIC_ALL_KEYS = STATIC_KEYS_LAYOUT.map((k) => ({
+  ...k,
+  label: SARGAM[((k.midi % 12) + 12) % 12],
+  nin: ((k.midi % 12) + 12) % 12,
+}));
+
+const STATIC_WHITE_KEYS = STATIC_ALL_KEYS.filter((k) => k.type === "w");
+const STATIC_BLACK_KEYS = STATIC_ALL_KEYS.filter((k) => k.type === "b");
+
 export default function Swaraa() {
   // Auth state
   const [user, setUser] = useState<User|null>(null)
@@ -650,13 +716,14 @@ export default function Swaraa() {
   const reverbNode = useRef<ConvolverNode|null>(null)
   const bassF = useRef<BiquadFilterNode|null>(null)
   const trebleF = useRef<BiquadFilterNode|null>(null)
-  const srcNodes = useRef<(AudioBufferSourceNode|null)[]>([])
-  const srcState = useRef<number[]>([])
-  const droneRef = useRef<AudioBufferSourceNode|null>(null)
+  const activeVoices = useRef<Map<number, ActiveVoice>>(new Map())
+  const droneSourceRef = useRef<AudioBufferSourceNode | OscillatorNode | null>(null)
+  const droneGainRef = useRef<GainNode | null>(null)
   const [droneNote, setDroneNote] = useState<number|null>(null)
   const recStart = useRef(0)
   const pTOs = useRef<ReturnType<typeof setTimeout>[]>([])
-  const kMap = useRef<number[]>([])
+  const sessionNotesCountRef = useRef(0)
+  const sessionNotesTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const guideStepRef = useRef(0)
   const guideListenRef = useRef(false)
   const octaveMap = [-36,-24,-12,0,12,24,36]
@@ -823,144 +890,497 @@ export default function Swaraa() {
     return()=>clearTimeout(initTimer)
   },[phase,user])
 
-  // ── AUDIO ────────────────────────────────────────────────────────
-  const initKMap=useCallback(()=>{
-    const s=60-124+(62-60)
-    for(let i=0;i<128;i++){kMap.current[i]=s+i+transpose}
-  },[transpose])
+  // ── AUDIO ENGINE (LAG-FREE, POP-FREE) ───────────────────────────
+  const stopAll = useCallback(() => {
+    const ctx = audioCtx.current
+    const now = ctx ? ctx.currentTime : 0
+    activeVoices.current.forEach((voice) => {
+      try {
+        if (ctx) {
+          voice.gain.gain.setValueAtTime(voice.gain.gain.value, now)
+          voice.gain.gain.linearRampToValueAtTime(0.0001, now + 0.02)
+        }
+        setTimeout(() => {
+          try {
+            voice.source.stop()
+            voice.source.disconnect()
+            voice.gain.disconnect()
+            voice.reedVoices?.forEach((r) => {
+              r.source.stop()
+              r.source.disconnect()
+              r.gain.disconnect()
+            })
+          } catch {}
+        }, 30)
+      } catch {}
+    })
+    activeVoices.current.clear()
+    setPressedKeys(new Set())
+  }, [])
 
-  const stopAll=useCallback(()=>{
-    for(let i=0;i<srcNodes.current.length;i++){
-      if(srcNodes.current[i]&&srcState.current[i]===1){try{srcNodes.current[i]!.stop(0)}catch{};srcState.current[i]=0}
+  const noteOn = useCallback((note: number, auto = false) => {
+    if (selectedRaga !== "Free") {
+      const n = ((note % 12) + 12) % 12
+      if (!RAGAS[selectedRaga].notes.includes(n)) return
     }
-  },[])
 
-  const setSrcNode=useCallback((idx:number)=>{
-    if(!audioCtx.current||!audioBuf.current||!bassF.current)return
-    if(srcNodes.current[idx]&&srcState.current[idx]===1){try{srcNodes.current[idx]!.stop(0)}catch{};srcState.current[idx]=0}
-    const s=audioCtx.current.createBufferSource()
-    s.buffer=audioBuf.current;s.loop=true;s.loopStart=0.5;s.loopEnd=7.5
-    if(kMap.current[idx]!==0)s.detune.value=kMap.current[idx]*100
-    s.connect(bassF.current);srcNodes.current[idx]=s
-  },[kMap])
+    const ctx = audioCtx.current
+    if (ctx) {
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => {})
+      }
+      const now = ctx.currentTime
 
-  const initSrcNodes=useCallback(()=>{
-    if(!audioCtx.current||!audioBuf.current)return
-    stopAll();srcNodes.current=new Array(128).fill(null);srcState.current=new Array(128).fill(0)
-    for(let i=0;i<128;i++)setSrcNode(i)
-  },[stopAll,setSrcNode])
+      // If note already ringing, smoothly ramp out previous voice to prevent phase buildup
+      const existing = activeVoices.current.get(note)
+      if (existing) {
+        try {
+          existing.gain.gain.setValueAtTime(existing.gain.gain.value, now)
+          existing.gain.gain.linearRampToValueAtTime(0.0001, now + 0.015)
+          setTimeout(() => {
+            try {
+              existing.source.stop()
+              existing.source.disconnect()
+              existing.gain.disconnect()
+              existing.reedVoices?.forEach((r) => {
+                r.source.stop()
+                r.source.disconnect()
+                r.gain.disconnect()
+              })
+            } catch {}
+          }, 25)
+        } catch {}
+        activeVoices.current.delete(note)
+      }
 
-  const noteOn=useCallback((note:number,auto=false)=>{
-    if(selectedRaga!=="Free"){const n=((note%12)+12)%12;if(!RAGAS[selectedRaga].notes.includes(n))return}
-    const idx=note+octaveMap[currentOctave]
-    if(idx>=0&&idx<srcNodes.current.length&&srcState.current[idx]===0){srcNodes.current[idx]?.start(0);srcState.current[idx]=1}
-    for(let c=1;c<=additionalReeds;c++){const ai=note+octaveMap[Math.min(6,currentOctave+c)];if(ai>=0&&ai<srcNodes.current.length&&srcState.current[ai]===0){srcNodes.current[ai]?.start(0);srcState.current[ai]=1}}
-    setPressedKeys(p=>new Set(p).add(note));setSessionNotes(n=>n+1)
-    setNoteHistory(p=>[getSargam(note),...p].slice(0,8))
-    if(isRecording&&!auto){const t=Date.now()-recStart.current;setRecordedNotes(p=>[...p,{note,time:t,type:"on"}])}
-    if(!auto&&activeGuide&&songLibrary[activeGuide]){
-      const song=songLibrary[activeGuide];const step=guideStepRef.current
-      if(step<song.notes.length){
-        const exp=song.notes[step].note
-        if(note===exp||note===exp-12||note===exp+12){
-          setHitFeedback("correct");setCorrectHits(h=>h+1)
-          const next=step+1;guideStepRef.current=next;setGuideStep(next)
-          if(next>=song.notes.length){setTimeout(()=>{setShowCelebration(true);triggerFireworks();playFireworkSound();setTimeout(()=>setShowCelebration(false),6000)},200)}
-          setTimeout(()=>setHitFeedback(null),350)
-        } else {setHitFeedback("wrong");setWrongHits(h=>h+1);setTimeout(()=>setHitFeedback(null),300)}
+      if (bassF.current) {
+        const baseMidi = note + octaveMap[currentOctave]
+        const primaryGain = ctx.createGain()
+        // Fast, smooth click-free attack (8ms)
+        primaryGain.gain.setValueAtTime(0.0001, now)
+        primaryGain.gain.linearRampToValueAtTime(1.0, now + 0.008)
+        primaryGain.connect(bassF.current)
+
+        let primarySource: AudioBufferSourceNode | OscillatorNode
+
+        if (audioBuf.current) {
+          const s = ctx.createBufferSource()
+          s.buffer = audioBuf.current
+          s.loop = true
+          s.loopStart = 0.5
+          s.loopEnd = 7.5
+          const detuneVal = (baseMidi - 62 + transpose) * 100
+          s.detune.setValueAtTime(detuneVal, now)
+          s.connect(primaryGain)
+          s.start(now)
+          primarySource = s
+        } else {
+          // Synthetic warm harmonium fallback if sample not yet ready
+          const osc = ctx.createOscillator()
+          osc.type = "sawtooth"
+          const freq = 440 * Math.pow(2, (baseMidi - 69 + transpose) / 12)
+          osc.frequency.setValueAtTime(freq, now)
+          osc.connect(primaryGain)
+          osc.start(now)
+          primarySource = osc
+        }
+
+        // Additional reeds layering (multi-reed octave doubling)
+        const reedVoices: { source: AudioBufferSourceNode | OscillatorNode; gain: GainNode }[] = []
+        for (let c = 1; c <= additionalReeds; c++) {
+          const reedMidi = note + octaveMap[Math.min(6, currentOctave + c)]
+          const reedGain = ctx.createGain()
+          reedGain.gain.setValueAtTime(0.0001, now)
+          reedGain.gain.linearRampToValueAtTime(0.65, now + 0.010)
+          reedGain.connect(bassF.current)
+
+          if (audioBuf.current) {
+            const rs = ctx.createBufferSource()
+            rs.buffer = audioBuf.current
+            rs.loop = true
+            rs.loopStart = 0.5
+            rs.loopEnd = 7.5
+            rs.detune.setValueAtTime((reedMidi - 62 + transpose) * 100, now)
+            rs.connect(reedGain)
+            rs.start(now)
+            reedVoices.push({ source: rs, gain: reedGain })
+          } else {
+            const rosc = ctx.createOscillator()
+            rosc.type = "sawtooth"
+            const rfreq = 440 * Math.pow(2, (reedMidi - 69 + transpose) / 12)
+            rosc.frequency.setValueAtTime(rfreq, now)
+            rosc.connect(reedGain)
+            rosc.start(now)
+            reedVoices.push({ source: rosc, gain: reedGain })
+          }
+        }
+
+        activeVoices.current.set(note, {
+          source: primarySource,
+          gain: primaryGain,
+          reedVoices,
+        })
       }
     }
-  },[currentOctave,additionalReeds,selectedRaga,activeGuide,songLibrary,isRecording])
 
-  const noteOff=useCallback((note:number,auto=false)=>{
-    const idx=note+octaveMap[currentOctave]
-    if(idx>=0&&idx<srcNodes.current.length)setSrcNode(idx)
-    for(let c=1;c<=additionalReeds;c++){const ai=note+octaveMap[Math.min(6,currentOctave+c)];if(ai>=0&&ai<srcNodes.current.length)setSrcNode(ai)}
-    setPressedKeys(p=>{const n=new Set(p);n.delete(note);return n})
-    if(isRecording&&!auto){const t=Date.now()-recStart.current;setRecordedNotes(p=>[...p,{note,time:t,type:"off"}])}
-  },[currentOctave,additionalReeds,setSrcNode,isRecording])
+    setPressedKeys((p) => {
+      if (p.has(note)) return p
+      const n = new Set(p)
+      n.add(note)
+      return n
+    })
 
-  useEffect(()=>{
-    const init=async()=>{
-      try{
-        const AC=window.AudioContext||(window as any).webkitAudioContext
-        audioCtx.current=new AC()
-        bassF.current=audioCtx.current.createBiquadFilter();bassF.current.type="lowshelf";bassF.current.frequency.value=200
-        trebleF.current=audioCtx.current.createBiquadFilter();trebleF.current.type="highshelf";trebleF.current.frequency.value=4000
-        gainNode.current=audioCtx.current.createGain();gainNode.current.gain.value=volume/100
-        bassF.current.connect(trebleF.current);trebleF.current.connect(gainNode.current);gainNode.current.connect(audioCtx.current.destination)
-        reverbNode.current=audioCtx.current.createConvolver();reverbNode.current.connect(audioCtx.current.destination)
-        try{const r=await fetch("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/harmonium-kannan-orig-6DIgVWUXlXjskJRcrUvRNLUBNigcyy.wav");if(r.ok)audioBuf.current=await audioCtx.current.decodeAudioData(await r.arrayBuffer())}catch{}
-        try{const rv=await fetch("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/reverb-OkQQ8iqL5OAhhMOQOXryBDa6TDHb1a.wav");if(rv.ok){reverbBuf.current=await audioCtx.current.decodeAudioData(await rv.arrayBuffer());reverbNode.current.buffer=reverbBuf.current}}catch{}
-        initKMap();initSrcNodes()
-        // MIDI
-        if(typeof navigator!=="undefined"&&typeof (navigator as any).requestMIDIAccess==="function"){
-          try{
-            const ma=await (navigator as any).requestMIDIAccess({sysex:false});setMidiSupported(true)
-            const devs:any[]=[]
-            for(const inp of ma.inputs.values()){devs.push({id:inp.id,name:inp.name});inp.onmidimessage=(msg:any)=>{const[cmd,note,vel=0]=msg.data;if(cmd===144&&vel>0)noteOn(note);else if(cmd===128||(cmd===144&&vel===0))noteOff(note)}}
-            setMidiDevices(devs)
-          }catch{}
+    // Batch session notes count updates to prevent heavy full-page re-renders
+    sessionNotesCountRef.current++
+    if (sessionNotesTimerRef.current === null) {
+      sessionNotesTimerRef.current = setTimeout(() => {
+        setSessionNotes(sessionNotesCountRef.current)
+        sessionNotesTimerRef.current = null
+      }, 250)
+    }
+
+    setNoteHistory((p) => [getSargam(note), ...p].slice(0, 8))
+
+    if (isRecording && !auto) {
+      const t = Date.now() - recStart.current
+      setRecordedNotes((p) => [...p, { note, time: t, type: "on" }])
+    }
+
+    if (!auto && activeGuide && songLibrary[activeGuide]) {
+      const song = songLibrary[activeGuide]
+      const step = guideStepRef.current
+      if (step < song.notes.length) {
+        const exp = song.notes[step].note
+        if (note === exp || note === exp - 12 || note === exp + 12) {
+          setHitFeedback("correct")
+          setCorrectHits((h) => h + 1)
+          const next = step + 1
+          guideStepRef.current = next
+          setGuideStep(next)
+          if (next >= song.notes.length) {
+            setTimeout(() => {
+              setShowCelebration(true)
+              triggerFireworks()
+              playFireworkSound()
+              setTimeout(() => setShowCelebration(false), 6000)
+            }, 200)
+          }
+          setTimeout(() => setHitFeedback(null), 350)
+        } else {
+          setHitFeedback("wrong")
+          setWrongHits((h) => h + 1)
+          setTimeout(() => setHitFeedback(null), 300)
         }
-      }catch{}
+      }
+    }
+  }, [currentOctave, additionalReeds, selectedRaga, activeGuide, songLibrary, isRecording, transpose])
+
+  const noteOff = useCallback((note: number, auto = false) => {
+    const ctx = audioCtx.current
+    if (ctx) {
+      const voice = activeVoices.current.get(note)
+      if (voice) {
+        activeVoices.current.delete(note)
+        const now = ctx.currentTime
+        const releaseTime = 0.06 // 60ms authentic reed decay, zero clicks
+        try {
+          voice.gain.gain.setValueAtTime(voice.gain.gain.value, now)
+          voice.gain.gain.exponentialRampToValueAtTime(0.0001, now + releaseTime)
+          voice.reedVoices?.forEach((r) => {
+            r.gain.gain.setValueAtTime(r.gain.gain.value, now)
+            r.gain.gain.exponentialRampToValueAtTime(0.0001, now + releaseTime)
+          })
+
+          setTimeout(() => {
+            try {
+              voice.source.stop()
+              voice.source.disconnect()
+              voice.gain.disconnect()
+              voice.reedVoices?.forEach((r) => {
+                r.source.stop()
+                r.source.disconnect()
+                r.gain.disconnect()
+              })
+            } catch {}
+          }, (releaseTime + 0.02) * 1000)
+        } catch {
+          try {
+            voice.source.stop()
+          } catch {}
+        }
+      }
+    }
+
+    setPressedKeys((p) => {
+      if (!p.has(note)) return p
+      const n = new Set(p)
+      n.delete(note)
+      return n
+    })
+
+    if (isRecording && !auto) {
+      const t = Date.now() - recStart.current
+      setRecordedNotes((p) => [...p, { note, time: t, type: "off" }])
+    }
+  }, [isRecording])
+
+  useEffect(() => {
+    const init = async () => {
+      try {
+        const AC = window.AudioContext || (window as any).webkitAudioContext
+        audioCtx.current = new AC()
+        bassF.current = audioCtx.current.createBiquadFilter()
+        bassF.current.type = "lowshelf"
+        bassF.current.frequency.value = 200
+        trebleF.current = audioCtx.current.createBiquadFilter()
+        trebleF.current.type = "highshelf"
+        trebleF.current.frequency.value = 4000
+        gainNode.current = audioCtx.current.createGain()
+        gainNode.current.gain.value = volume / 100
+        bassF.current.connect(trebleF.current)
+        trebleF.current.connect(gainNode.current)
+        gainNode.current.connect(audioCtx.current.destination)
+        reverbNode.current = audioCtx.current.createConvolver()
+        reverbNode.current.connect(audioCtx.current.destination)
+
+        // Load local audio samples first, with fallback to remote Vercel storage
+        const loadSamples = async () => {
+          try {
+            let r = await fetch("/harmonium-kannan-orig.wav")
+            if (!r.ok) {
+              r = await fetch("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/harmonium-kannan-orig-6DIgVWUXlXjskJRcrUvRNLUBNigcyy.wav")
+            }
+            if (r.ok && audioCtx.current) {
+              const ab = await r.arrayBuffer()
+              audioBuf.current = await audioCtx.current.decodeAudioData(ab)
+            }
+          } catch (e) {
+            console.warn("Harmonium sample load warning:", e)
+          }
+
+          try {
+            let rv = await fetch("/reverb.wav")
+            if (!rv.ok) {
+              rv = await fetch("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/reverb-OkQQ8iqL5OAhhMOQOXryBDa6TDHb1a.wav")
+            }
+            if (rv.ok && audioCtx.current && reverbNode.current) {
+              const ab = await rv.arrayBuffer()
+              reverbBuf.current = await audioCtx.current.decodeAudioData(ab)
+              reverbNode.current.buffer = reverbBuf.current
+            }
+          } catch (e) {
+            console.warn("Reverb sample load warning:", e)
+          }
+        }
+        loadSamples()
+
+        // Robust MIDI setup supporting any channel (1-16)
+        if (typeof navigator !== "undefined" && typeof (navigator as any).requestMIDIAccess === "function") {
+          try {
+            const ma = await (navigator as any).requestMIDIAccess({ sysex: false })
+            setMidiSupported(true)
+            const devs: any[] = []
+            for (const inp of ma.inputs.values()) {
+              devs.push({ id: inp.id, name: inp.name })
+              inp.onmidimessage = (msg: any) => {
+                if (!msg.data || msg.data.length < 2) return
+                const [status, note, vel = 0] = msg.data
+                const cmd = status & 0xf0
+                if (cmd === 0x90 && vel > 0) noteOn(note)
+                else if (cmd === 0x80 || (cmd === 0x90 && vel === 0)) noteOff(note)
+              }
+            }
+            setMidiDevices(devs)
+          } catch {}
+        }
+      } catch {}
     }
     init()
-  },[])
+  }, [])
 
-  const handleKD=useCallback((e:KeyboardEvent)=>{
-    if(e.repeat||phase==="landing")return
-    if(e.altKey&&!e.ctrlKey){e.preventDefault();if(e.key==="ArrowUp")setVolume(v=>Math.min(100,v+5));if(e.key==="ArrowDown")setVolume(v=>Math.max(0,v-5));return}
-    if(KB[e.key]!==undefined)noteOn(KB[e.key])
-  },[phase,noteOn])
-  const handleKU=useCallback((e:KeyboardEvent)=>{if(phase==="landing")return;if(KB[e.key]!==undefined)noteOff(KB[e.key])},[phase,noteOff])
-  useEffect(()=>{window.addEventListener("keydown",handleKD);window.addEventListener("keyup",handleKU);return()=>{window.removeEventListener("keydown",handleKD);window.removeEventListener("keyup",handleKU)}},[handleKD,handleKU])
-  useEffect(()=>{if(gainNode.current)gainNode.current.gain.value=volume/100},[volume])
-  useEffect(()=>{if(bassF.current)bassF.current.gain.value=bassEQ},[bassEQ])
-  useEffect(()=>{if(trebleF.current)trebleF.current.gain.value=trebleEQ},[trebleEQ])
-  useEffect(()=>{initKMap();initSrcNodes()},[transpose])
-  useEffect(()=>{if(!audioCtx.current)return;stopAll();initSrcNodes()},[currentOctave,additionalReeds])
-  useEffect(()=>{if(gainNode.current&&reverbNode.current){if(useReverb){try{gainNode.current.connect(reverbNode.current)}catch{}}else{try{gainNode.current.disconnect(reverbNode.current)}catch{}}}},[useReverb])
-  useEffect(()=>{const f=()=>stopAll();window.addEventListener("blur",f);return()=>window.removeEventListener("blur",f)},[stopAll])
+  const handleKD = useCallback((e: KeyboardEvent) => {
+    if (e.repeat || phase === "landing") return
+    const target = e.target as HTMLElement | null
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      return
+    }
+    if (e.altKey && !e.ctrlKey) {
+      e.preventDefault()
+      if (e.key === "ArrowUp") setVolume((v) => Math.min(100, v + 5))
+      if (e.key === "ArrowDown") setVolume((v) => Math.max(0, v - 5))
+      return
+    }
+    if (KB[e.key] !== undefined) noteOn(KB[e.key])
+  }, [phase, noteOn])
 
-  const getRootNote=()=>["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"][transpose>=0?transpose%12:transpose+12]
+  const handleKU = useCallback((e: KeyboardEvent) => {
+    if (phase === "landing") return
+    const target = e.target as HTMLElement | null
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      return
+    }
+    if (KB[e.key] !== undefined) noteOff(KB[e.key])
+  }, [phase, noteOff])
 
-  const startDrone=(note:number)=>{
-    if(!audioCtx.current||!audioBuf.current||!bassF.current)return
-    if(droneRef.current){try{droneRef.current.stop()}catch{}}
-    if(droneNote===note){setDroneNote(null);droneRef.current=null;return}
-    const s=audioCtx.current.createBufferSource();s.buffer=audioBuf.current;s.loop=true;s.loopStart=0.5;s.loopEnd=7.5
-    const g=audioCtx.current.createGain();g.gain.value=0.35;s.connect(g);g.connect(bassF.current);s.start()
-    droneRef.current=s;setDroneNote(note);showToast(`Drone: ${getSargam(note)}`)
+  useEffect(() => {
+    window.addEventListener("keydown", handleKD)
+    window.addEventListener("keyup", handleKU)
+    return () => {
+      window.removeEventListener("keydown", handleKD)
+      window.removeEventListener("keyup", handleKU)
+    }
+  }, [handleKD, handleKU])
+
+  useEffect(() => {
+    if (gainNode.current) gainNode.current.gain.value = volume / 100
+  }, [volume])
+
+  useEffect(() => {
+    if (bassF.current) bassF.current.gain.value = bassEQ
+  }, [bassEQ])
+
+  useEffect(() => {
+    if (trebleF.current) trebleF.current.gain.value = trebleEQ
+  }, [trebleEQ])
+
+  useEffect(() => {
+    stopAll()
+  }, [currentOctave, additionalReeds, transpose, stopAll])
+
+  useEffect(() => {
+    if (gainNode.current && reverbNode.current) {
+      if (useReverb) {
+        try {
+          gainNode.current.connect(reverbNode.current)
+        } catch {}
+      } else {
+        try {
+          gainNode.current.disconnect(reverbNode.current)
+        } catch {}
+      }
+    }
+  }, [useReverb])
+
+  useEffect(() => {
+    const f = () => stopAll()
+    window.addEventListener("blur", f)
+    return () => window.removeEventListener("blur", f)
+  }, [stopAll])
+
+  const getRootNote = () => ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][transpose >= 0 ? transpose % 12 : transpose + 12]
+
+  const startDrone = (note: number) => {
+    const ctx = audioCtx.current
+    if (!ctx || !bassF.current) return
+    if (ctx.state === "suspended") ctx.resume().catch(() => {})
+    const now = ctx.currentTime
+
+    if (droneSourceRef.current && droneGainRef.current) {
+      try {
+        droneGainRef.current.gain.setValueAtTime(droneGainRef.current.gain.value, now)
+        droneGainRef.current.gain.linearRampToValueAtTime(0.0001, now + 0.08)
+        const oldSrc = droneSourceRef.current
+        setTimeout(() => {
+          try {
+            oldSrc.stop()
+            oldSrc.disconnect()
+          } catch {}
+        }, 100)
+      } catch {}
+      droneSourceRef.current = null
+      droneGainRef.current = null
+    }
+
+    if (droneNote === note) {
+      setDroneNote(null)
+      return
+    }
+
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0.0001, now)
+    g.gain.linearRampToValueAtTime(0.35, now + 0.12)
+    g.connect(bassF.current)
+    droneGainRef.current = g
+
+    const baseMidi = note + octaveMap[currentOctave]
+    if (audioBuf.current) {
+      const s = ctx.createBufferSource()
+      s.buffer = audioBuf.current
+      s.loop = true
+      s.loopStart = 0.5
+      s.loopEnd = 7.5
+      s.detune.setValueAtTime((baseMidi - 62 + transpose) * 100, now)
+      s.connect(g)
+      s.start(now)
+      droneSourceRef.current = s
+    } else {
+      const osc = ctx.createOscillator()
+      osc.type = "triangle"
+      const freq = 440 * Math.pow(2, (baseMidi - 69 + transpose) / 12)
+      osc.frequency.setValueAtTime(freq, now)
+      osc.connect(g)
+      osc.start(now)
+      droneSourceRef.current = osc
+    }
+
+    setDroneNote(note)
+    showToast(`Drone: ${getSargam(note)}`)
   }
 
-  const stopPB=useCallback(()=>{
-    pTOs.current.forEach(t=>clearTimeout(t))
-    pTOs.current=[]
+  const stopPB = useCallback(() => {
+    pTOs.current.forEach((t) => clearTimeout(t))
+    pTOs.current = []
     stopAll()
-    initSrcNodes()
     setIsPlayingSong(false)
     setPlayingSongName(null)
     setPlayingBack(false)
-  },[stopAll,initSrcNodes])
+  }, [stopAll])
 
-  const playSong=(name:string,songNotes?:SongNote[])=>{
-    if(isPlayingSong){stopPB();return}
-    const notes=songNotes||songLibrary[name]?.notes;if(!notes)return
-    setPlayingSongName(name);setIsPlayingSong(true);showToast(`▶ ${name}`)
-    const tos:ReturnType<typeof setTimeout>[]=[];let t=0
-    notes.forEach(ev=>{tos.push(setTimeout(()=>noteOn(ev.note,true),t));tos.push(setTimeout(()=>noteOff(ev.note,true),t+ev.duration*0.9));t+=ev.duration})
-    tos.push(setTimeout(()=>{setIsPlayingSong(false);setPlayingSongName(null);setPlayingBack(false)},t+300))
-    pTOs.current=tos
+  const playSong = (name: string, songNotes?: SongNote[]) => {
+    if (isPlayingSong) {
+      stopPB()
+      return
+    }
+    const notes = songNotes || songLibrary[name]?.notes
+    if (!notes) return
+    setPlayingSongName(name)
+    setIsPlayingSong(true)
+    showToast(`▶ ${name}`)
+    const tos: ReturnType<typeof setTimeout>[] = []
+    let t = 0
+    notes.forEach((ev) => {
+      tos.push(setTimeout(() => noteOn(ev.note, true), t))
+      tos.push(setTimeout(() => noteOff(ev.note, true), t + ev.duration * 0.9))
+      t += ev.duration
+    })
+    tos.push(setTimeout(() => {
+      setIsPlayingSong(false)
+      setPlayingSongName(null)
+      setPlayingBack(false)
+    }, t + 300))
+    pTOs.current = tos
   }
 
-  const playRecordingBack=(notes:RecordedNote[])=>{
-    if(playingBack){stopPB();return}
-    setPlayingBack(true);showToast("▶ Playing recording")
-    const tos:ReturnType<typeof setTimeout>[]=[]
-    notes.forEach(ev=>{tos.push(setTimeout(()=>{if(ev.type==="on")noteOn(ev.note,true);else noteOff(ev.note,true)},ev.time))})
-    const last=notes[notes.length-1]
-    tos.push(setTimeout(()=>{setPlayingBack(false);showToast("⏹ Done")},last.time+500))
-    pTOs.current=tos
+  const playRecordingBack = (notes: RecordedNote[]) => {
+    if (playingBack) {
+      stopPB()
+      return
+    }
+    setPlayingBack(true)
+    showToast("▶ Playing recording")
+    const tos: ReturnType<typeof setTimeout>[] = []
+    notes.forEach((ev) => {
+      tos.push(setTimeout(() => {
+        if (ev.type === "on") noteOn(ev.note, true)
+        else noteOff(ev.note, true)
+      }, ev.time))
+    })
+    const last = notes[notes.length - 1]
+    tos.push(setTimeout(() => {
+      setPlayingBack(false)
+      showToast("⏹ Done")
+    }, last.time + 500))
+    pTOs.current = tos
   }
 
   const openSheet=(name:string)=>{setActiveSheet(name);setActiveGuide(null);setActiveSection("practice")}
@@ -976,7 +1396,7 @@ export default function Swaraa() {
   },[activeGuide,songLibrary,noteOn,noteOff])
 
   const toggleListen=()=>{
-    if(guideListenActive){guideListenRef.current=false;setGuideListenActive(false);stopAll();initSrcNodes()}
+    if(guideListenActive){guideListenRef.current=false;setGuideListenActive(false);stopAll()}
     else{guideListenRef.current=true;setGuideListenActive(true);playGuideStep()}
   }
 
@@ -1008,65 +1428,23 @@ export default function Swaraa() {
 
   const searchResults=searchQ.trim()?Object.keys(songLibrary).filter(n=>{const s=songLibrary[n];const q=searchQ.toLowerCase();return n.toLowerCase().includes(q)||s.genre?.toLowerCase().includes(q)||s.language?.toLowerCase().includes(q)||s.description?.toLowerCase().includes(q)}):[]
 
-  // ── PIANO KEYS BUILD ──────────────────────────────────────────────
-  const buildKeys=()=>{
-    // 3 octaves: F3→B5 = 21 white keys, 14 black keys
-    // White: ` q w e r t y u i o p [ ] \ z x c v b n m
-    // Black: 1 2 4 5 7 8 9 - = (first octave), then shift variants for higher octaves
-    const layout:Array<{type:"w"|"b";midi:number;kchar:string}> = [
-      // ── Octave 1: F3-E4 ──
-      {type:"w",midi:53,kchar:"`"},   // F3  Sa
-      {type:"b",midi:54,kchar:"1"},   // F#3
-      {type:"w",midi:55,kchar:"q"},   // G3  Re
-      {type:"b",midi:56,kchar:"2"},   // G#3
-      {type:"w",midi:57,kchar:"w"},   // A3  Ga
-      {type:"w",midi:58,kchar:"e"},   // A#3 Ga#
-      {type:"b",midi:59,kchar:"4"},   // B3
-      {type:"w",midi:60,kchar:"r"},   // C4  Sa (middle)
-      {type:"b",midi:61,kchar:"5"},   // C#4
-      {type:"w",midi:62,kchar:"t"},   // D4  Re
-      {type:"b",midi:63,kchar:"7"},   // D#4
-      {type:"w",midi:64,kchar:"y"},   // E4  Ga
-      // ── Octave 2: F4-E5 ──
-      {type:"w",midi:65,kchar:"u"},   // F4  Ma
-      {type:"b",midi:66,kchar:"8"},   // F#4
-      {type:"w",midi:67,kchar:"i"},   // G4  Pa
-      {type:"b",midi:68,kchar:"9"},   // G#4
-      {type:"w",midi:69,kchar:"o"},   // A4  Dha
-      {type:"b",midi:70,kchar:"-"},   // A#4
-      {type:"w",midi:71,kchar:"p"},   // B4  Ni
-      {type:"w",midi:72,kchar:"["},   // C5  Sa'
-      {type:"b",midi:73,kchar:"="},   // C#5
-      {type:"w",midi:74,kchar:"]"},   // D5  Re'
-      {type:"b",midi:75,kchar:""},    // D#5
-      {type:"w",midi:76,kchar:"\\"},// E5  Ga'
-      // ── Octave 3: F5-E6 ──
-      {type:"w",midi:77,kchar:"z"},   // F5  Ma'
-      {type:"b",midi:78,kchar:""},    // F#5
-      {type:"w",midi:79,kchar:"x"},   // G5  Pa'
-      {type:"b",midi:80,kchar:""},    // G#5
-      {type:"w",midi:81,kchar:"c"},   // A5  Dha'
-      {type:"w",midi:82,kchar:""},    // A#5
-      {type:"b",midi:83,kchar:""},    // B5
-      {type:"w",midi:84,kchar:"v"},   // C6  Sa''
-    ]
-    return layout.map(k=>({
-      ...k,
-      label: SARGAM[((k.midi%12)+12)%12],
-      nin: ((k.midi%12)+12)%12
-    }))
-  }
-    const allKeys=buildKeys();const wKeys=allKeys.filter(k=>k.type==="w");const bKeys=allKeys.filter(k=>k.type==="b")
-  const isGuideKey=(midi:number)=>{
-    if(!activeGuide||!songLibrary[activeGuide])return false
-    const song=songLibrary[activeGuide];if(guideStep>=song.notes.length)return false
-    const exp=song.notes[guideStep].note;return midi===exp||midi===exp-12||midi===exp+12
+  // ── PIANO KEYS (STATIC PRE-BUILT) ──────────────────────────────────
+  const allKeys = STATIC_ALL_KEYS
+  const wKeys = STATIC_WHITE_KEYS
+  const bKeys = STATIC_BLACK_KEYS
+
+  const isGuideKey = (midi: number) => {
+    if (!activeGuide || !songLibrary[activeGuide]) return false
+    const song = songLibrary[activeGuide]
+    if (guideStep >= song.notes.length) return false
+    const exp = song.notes[guideStep].note
+    return midi === exp || midi === exp - 12 || midi === exp + 12
   }
 
-  const G="#f59e0b",Gd="rgba(245,158,11,0.1)",Gb="rgba(245,158,11,0.18)"
-  const diffColor=(d:string)=>d==="Easy"?"#10b981":d==="Medium"?G:"#ef4444"
-  const allGenres=["All",...Array.from(new Set(Object.values(songLibrary).map(s=>s.genre)))]
-  const filteredSongs=Object.keys(songLibrary).filter(n=>genreFilter==="All"||songLibrary[n].genre===genreFilter)
+  const G = "#f59e0b", Gd = "rgba(245,158,11,0.1)", Gb = "rgba(245,158,11,0.18)"
+  const diffColor = (d: string) => (d === "Easy" ? "#10b981" : d === "Medium" ? G : "#ef4444")
+  const allGenres = useMemo(() => ["All", ...Array.from(new Set(Object.values(songLibrary).map((s) => s.genre)))], [songLibrary])
+  const filteredSongs = useMemo(() => Object.keys(songLibrary).filter((n) => genreFilter === "All" || songLibrary[n].genre === genreFilter), [songLibrary, genreFilter])
 
   // ════════════════════════════════════════════════════════════════
   // ── AUTH SCREEN ──────────────────────────────────────────────────
@@ -1242,10 +1620,10 @@ export default function Swaraa() {
               <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",overflowX:"auto",padding:"16px 20px",scrollbarWidth:"none"}}>
                 <div style={{position:"relative",height:236}}>
                   <div style={{display:"flex",position:"absolute",bottom:0,gap:2}}>
-                    {wKeys.map((k,wi)=>{const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);return(<div key={wi} onMouseDown={()=>!blk2&&noteOn(k.midi)} onMouseUp={()=>noteOff(k.midi)} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} className={active?"correct-anim":""} style={{width:64,height:220,borderRadius:"0 0 12px 12px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:12,background:active?"linear-gradient(180deg,#fef3c7,#fbbf24 70%,#f59e0b)":blk2?"linear-gradient(180deg,#9ca3af,#6b7280)":"linear-gradient(180deg,#fffef8,#f5f0e0 70%,#e8dfc8)",border:`1.5px solid ${active?G:blk2?"#4b5563":"#c8b898"}`,boxShadow:active?`0 0 22px rgba(245,158,11,0.65)`:"0 5px 12px rgba(0,0,0,0.45)",transform:active?"translateY(5px)":"none",transition:"all 0.07s",zIndex:1}}><div style={{fontSize:14,fontWeight:700,color:active?"#92400e":"#6b5030"}}>{k.label}</div>{k.kchar&&<div style={{fontSize:11,color:"rgba(100,70,20,0.6)",fontWeight:600}}>{k.kchar}</div>}</div>)})}
+                    {wKeys.map((k,wi)=>{const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);return(<div key={wi} onMouseDown={()=>!blk2&&noteOn(k.midi)} onMouseUp={()=>noteOff(k.midi)} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} onTouchCancel={e=>{e.preventDefault();noteOff(k.midi)}} className={active?"correct-anim":""} style={{width:64,height:220,borderRadius:"0 0 12px 12px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:12,background:active?"linear-gradient(180deg,#fef3c7,#fbbf24 70%,#f59e0b)":blk2?"linear-gradient(180deg,#9ca3af,#6b7280)":"linear-gradient(180deg,#fffef8,#f5f0e0 70%,#e8dfc8)",border:`1.5px solid ${active?G:blk2?"#4b5563":"#c8b898"}`,boxShadow:active?`0 0 22px rgba(245,158,11,0.65)`:"0 5px 12px rgba(0,0,0,0.45)",transform:active?"translateY(5px)":"none",transition:"all 0.07s",touchAction:"none",zIndex:1}}><div style={{fontSize:14,fontWeight:700,color:active?"#92400e":"#6b5030"}}>{k.label}</div>{k.kchar&&<div style={{fontSize:11,color:"rgba(100,70,20,0.6)",fontWeight:600}}>{k.kchar}</div>}</div>)})}
                   </div>
                   <div style={{position:"absolute",top:0,left:0,zIndex:2,pointerEvents:"none"}}>
-                    {(()=>{const BL:Record<number,number>={54:42,56:108,59:240,61:306,63:372,66:504,68:570,70:636,73:768,75:834,78:966,80:1032,83:1164};return bKeys.map((k)=>{const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);const lp=BL[k.midi]??0;return(<div key={k.midi} onMouseDown={e=>{e.stopPropagation();!blk2&&noteOn(k.midi)}} onMouseUp={e=>{e.stopPropagation();noteOff(k.midi)}} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();e.stopPropagation();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} style={{pointerEvents:"all",position:"absolute",left:lp,top:0,width:42,height:136,borderRadius:"0 0 8px 8px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:6,background:active?"linear-gradient(180deg,#fbbf24,#d97706)":blk2?"linear-gradient(180deg,#374151,#1f2937)":"linear-gradient(180deg,#1c1008,#0a0604)",border:`1px solid ${active?G:blk2?"#374151":"rgba(0,0,0,.9)"}`,boxShadow:active?`0 0 20px rgba(245,158,11,.75)`:"0 6px 12px rgba(0,0,0,.9)",transform:active?"translateY(3px)":"none",transition:"all 0.07s"}}><div style={{fontSize:10,fontWeight:700,color:active?"#92400e":"rgba(200,150,80,.7)"}}>{k.label}</div></div>)})})()}
+                    {bKeys.map((k) => {const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);const lp=BLACK_KEY_LEFT_POSITIONS[k.midi] ?? 0;return(<div key={k.midi} onMouseDown={e=>{e.stopPropagation();!blk2&&noteOn(k.midi)}} onMouseUp={e=>{e.stopPropagation();noteOff(k.midi)}} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();e.stopPropagation();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} onTouchCancel={e=>{e.preventDefault();noteOff(k.midi)}} style={{pointerEvents:"all",position:"absolute",left:lp,top:0,width:42,height:136,borderRadius:"0 0 8px 8px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:6,background:active?"linear-gradient(180deg,#fbbf24,#d97706)":blk2?"linear-gradient(180deg,#374151,#1f2937)":"linear-gradient(180deg,#1c1008,#0a0604)",border:`1px solid ${active?G:blk2?"#374151":"rgba(0,0,0,.9)"}`,boxShadow:active?`0 0 20px rgba(245,158,11,.75)`:"0 6px 12px rgba(0,0,0,.9)",transform:active?"translateY(3px)":"none",transition:"all 0.07s"}}><div style={{fontSize:10,fontWeight:700,color:active?"#92400e":"rgba(200,150,80,.7)"}}>{k.label}</div></div>)})}
                   </div>
                 </div>
               </div>
@@ -1284,10 +1662,10 @@ export default function Swaraa() {
               <div style={{display:"flex",justifyContent:"center",minWidth:"max-content"}}>
                 <div style={{position:"relative",height:236}}>
                   <div style={{display:"flex",position:"absolute",bottom:0,gap:2}}>
-                    {wKeys.map((k,wi)=>{const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);const guide=isGuideKey(k.midi);return(<div key={wi} onMouseDown={()=>!blk2&&noteOn(k.midi)} onMouseUp={()=>noteOff(k.midi)} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} className={`${active?"correct-anim":""}${guide?" guide-key":""}`} style={{width:64,height:220,borderRadius:"0 0 12px 12px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:12,background:active?"linear-gradient(180deg,#fef3c7,#fbbf24 70%,#f59e0b)":guide?"linear-gradient(180deg,#d1fae5,#6ee7b7 70%,#10b981)":blk2?"linear-gradient(180deg,#9ca3af,#6b7280)":"linear-gradient(180deg,#fffef8,#f5f0e0 70%,#e8dfc8)",border:`1.5px solid ${active?G:guide?"#10b981":blk2?"#4b5563":"#c8b898"}`,boxShadow:active?`0 0 22px rgba(245,158,11,.65)`:guide?"":"0 5px 12px rgba(0,0,0,.45)",transform:active?"translateY(5px)":guide?"translateY(-3px)":"none",transition:"all 0.07s",zIndex:1}}><div style={{fontSize:14,fontWeight:700,color:active?"#92400e":guide?"#065f46":blk2?"rgba(255,255,255,.4)":"#6b5030"}}>{k.label}</div>{k.kchar&&<div style={{fontSize:11,color:guide?"rgba(6,95,70,.8)":"rgba(100,70,20,.55)",fontWeight:600}}>{k.kchar}</div>}</div>)})}
+                    {wKeys.map((k,wi)=>{const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);const guide=isGuideKey(k.midi);return(<div key={wi} onMouseDown={()=>!blk2&&noteOn(k.midi)} onMouseUp={()=>noteOff(k.midi)} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} onTouchCancel={e=>{e.preventDefault();noteOff(k.midi)}} className={`${active?"correct-anim":""}${guide?" guide-key":""}`} style={{width:64,height:220,borderRadius:"0 0 12px 12px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:12,background:active?"linear-gradient(180deg,#fef3c7,#fbbf24 70%,#f59e0b)":guide?"linear-gradient(180deg,#d1fae5,#6ee7b7 70%,#10b981)":blk2?"linear-gradient(180deg,#9ca3af,#6b7280)":"linear-gradient(180deg,#fffef8,#f5f0e0 70%,#e8dfc8)",border:`1.5px solid ${active?G:guide?"#10b981":blk2?"#4b5563":"#c8b898"}`,boxShadow:active?`0 0 22px rgba(245,158,11,.65)`:guide?"":"0 5px 12px rgba(0,0,0,.45)",transform:active?"translateY(5px)":guide?"translateY(-3px)":"none",transition:"all 0.07s",touchAction:"none",zIndex:1}}><div style={{fontSize:14,fontWeight:700,color:active?"#92400e":guide?"#065f46":blk2?"rgba(255,255,255,.4)":"#6b5030"}}>{k.label}</div>{k.kchar&&<div style={{fontSize:11,color:guide?"rgba(6,95,70,.8)":"rgba(100,70,20,.55)",fontWeight:600}}>{k.kchar}</div>}</div>)})}
                   </div>
                   <div style={{position:"absolute",top:0,left:0,zIndex:2,pointerEvents:"none"}}>
-                    {(()=>{const BL:Record<number,number>={54:42,56:108,59:240,61:306,63:372,66:504,68:570,70:636,73:768,75:834,78:966,80:1032,83:1164};return bKeys.map((k)=>{const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);const guide=isGuideKey(k.midi);const lp=BL[k.midi]??0;return(<div key={k.midi} onMouseDown={e=>{e.stopPropagation();!blk2&&noteOn(k.midi)}} onMouseUp={e=>{e.stopPropagation();noteOff(k.midi)}} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();e.stopPropagation();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} className={guide?"guide-key":""} style={{pointerEvents:"all",position:"absolute",left:lp,top:0,width:42,height:136,borderRadius:"0 0 8px 8px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:6,background:active?"linear-gradient(180deg,#fbbf24,#d97706)":guide?"linear-gradient(180deg,#6ee7b7,#10b981)":blk2?"linear-gradient(180deg,#374151,#1f2937)":"linear-gradient(180deg,#1c1008,#0a0604)",border:`1px solid ${active?G:guide?"#10b981":blk2?"#374151":"rgba(0,0,0,.9)"}`,boxShadow:active?`0 0 20px rgba(245,158,11,.75)`:guide?`0 0 25px rgba(16,185,129,.85)`:"0 6px 12px rgba(0,0,0,.9)",transform:active?"translateY(3px)":guide?"translateY(-3px)":"none",transition:"all 0.07s"}}><div style={{fontSize:10,fontWeight:700,color:active?"#92400e":guide?"#064e3b":"rgba(200,150,80,.7)"}}>{k.label}</div></div>)})})()}
+                    {bKeys.map((k) => {const active=pressedKeys.has(k.midi);const blk2=selectedRaga!=="Free"&&!RAGAS[selectedRaga].notes.includes(k.nin);const guide=isGuideKey(k.midi);const lp=BLACK_KEY_LEFT_POSITIONS[k.midi] ?? 0;return(<div key={k.midi} onMouseDown={e=>{e.stopPropagation();!blk2&&noteOn(k.midi)}} onMouseUp={e=>{e.stopPropagation();noteOff(k.midi)}} onMouseLeave={()=>noteOff(k.midi)} onTouchStart={e=>{e.preventDefault();e.stopPropagation();!blk2&&noteOn(k.midi)}} onTouchEnd={e=>{e.preventDefault();noteOff(k.midi)}} onTouchCancel={e=>{e.preventDefault();noteOff(k.midi)}} className={guide?"guide-key":""} style={{pointerEvents:"all",position:"absolute",left:lp,top:0,width:42,height:136,borderRadius:"0 0 8px 8px",cursor:"pointer",userSelect:"none",display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:6,background:active?"linear-gradient(180deg,#fbbf24,#d97706)":guide?"linear-gradient(180deg,#6ee7b7,#10b981)":blk2?"linear-gradient(180deg,#374151,#1f2937)":"linear-gradient(180deg,#1c1008,#0a0604)",border:`1px solid ${active?G:guide?"#10b981":blk2?"#374151":"rgba(0,0,0,.9)"}`,boxShadow:active?`0 0 20px rgba(245,158,11,.75)`:guide?`0 0 25px rgba(16,185,129,.85)`:"0 6px 12px rgba(0,0,0,.9)",transform:active?"translateY(3px)":guide?"translateY(-3px)":"none",transition:"all 0.07s"}}><div style={{fontSize:10,fontWeight:700,color:active?"#92400e":guide?"#064e3b":"rgba(200,150,80,.7)"}}>{k.label}</div></div>)})}
                   </div>
                 </div>
               </div>
